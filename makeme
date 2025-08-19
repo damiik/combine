@@ -1,0 +1,2 @@
+#bin/bash
+g++ -std=c++23 -O2 -Wall main.cpp -o combine
