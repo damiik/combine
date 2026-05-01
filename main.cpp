@@ -26,12 +26,25 @@ const std::unordered_map<std::string, std::string> extToLang = {
     {".c",   "c"},
     {".hpp", "h"},   {".hh", "h"},   {".hxx", "h"}, {".h", "h"},
     {".m",   "objc"},
+    {".rs", "rust"},
+    {".go", "go"},
+    {".java", "java"},
+    {".cs", "csharp"},
+    {".php", "php"},
+    {".zig", "zig"},
+    {".odin", "odin"},
+    {".nim", "nim"},
     {".swift", "swift"},
     {".py",  "python"},
     {".js",  "javascript"},
+    {".ts",  "typescript"}, {".tsx", "typescript"},
     {".dart", "dart"},
     {".ml", "ocaml"},
-    {".hs", "haskell"}
+    {".hs", "haskell"},
+    {".css", "css"},
+    {".md", "markdown"},
+    {".json", "json"},
+    {".txt", "text"}
 };
 
 
