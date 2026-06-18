@@ -9,16 +9,85 @@
 #include <unordered_map>
 #include <map>
 #include <functional>
+#include <cstring>
 
 namespace fs = std::filesystem;
 
-// ANSI color codes for ayu-mirage theme
-const std::string RESET = "\033[0m";
-const std::string TREE_COLOR = "\033[38;5;243m";    // muted gray for tree characters
-const std::string DIR_COLOR = "\033[38;5;109m";     // blue for directories
-const std::string FILE_COLOR = "\033[38;5;248m";    // light gray for files
-const std::string COUNT_COLOR = "\033[38;5;142m";   // green for line counts
-const std::string HEADER_COLOR = "\033[38;5;180m";  // orange for headers
+#ifdef _WIN32
+#include <windows.h>
+bool enableVirtualTerminal() {
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hOut == INVALID_HANDLE_VALUE) return false;
+    DWORD dwMode = 0;
+    if (!GetConsoleMode(hOut, &dwMode)) return false;
+    dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    return SetConsoleMode(hOut, dwMode);
+}
+#endif
+
+bool useColors = true;
+
+void initColors() {
+#ifdef _WIN32
+    SetConsoleOutputCP(65001);
+    useColors = enableVirtualTerminal();
+#endif
+}
+
+std::string RESET = "";
+std::string TREE_COLOR = "";
+std::string DIR_COLOR = "";
+std::string FILE_COLOR = "";
+std::string COUNT_COLOR = "";
+std::string HEADER_COLOR = "";
+
+void setColors() {
+    if (!useColors) return;
+    RESET = "\033[0m";
+    TREE_COLOR = "\033[38;5;243m";
+    DIR_COLOR = "\033[38;5;109m";
+    FILE_COLOR = "\033[38;5;248m";
+    COUNT_COLOR = "\033[38;5;142m";
+    HEADER_COLOR = "\033[38;5;180m";
+}
+
+std::string convertEmojis(const std::string& text) {
+#ifdef _WIN32
+    std::string result = text;
+    size_t pos = std::string::npos;
+    while ((pos = result.find("📦")) != std::string::npos) {
+        result.replace(pos, 3, "[P]");
+    }
+    while ((pos = result.find("📁")) != std::string::npos) {
+        result.replace(pos, 3, "[DIR]");
+    }
+    while ((pos = result.find("✅")) != std::string::npos) {
+        result.replace(pos, 3, "[OK]");
+    }
+    while ((pos = result.find("🎉")) != std::string::npos) {
+        result.replace(pos, 3, "[DONE]");
+    }
+    return result;
+#else
+    return text;
+#endif
+}
+
+char getPathSeparator() {
+#ifdef _WIN32
+    return '\\';
+#else
+    return '/';
+#endif
+}
+
+std::string normalizePathSep(const std::string& path) {
+    std::string result = path;
+    for (char& c : result) {
+        if (c == '\\') c = '/';
+    }
+    return result;
+}
 
 
 const std::unordered_map<std::string, std::string> extToLang = {
@@ -37,7 +106,10 @@ const std::unordered_map<std::string, std::string> extToLang = {
     {".swift", "swift"},
     {".py",  "python"},
     {".js",  "javascript"},
-    {".ts",  "typescript"}, {".tsx", "typescript"},
+    {".tsx", "typescript"},
+    {".ts",  "typescript"},
+    {".purs", "purescript"},
+    {".scala", "scala"},
     {".dart", "dart"},
     {".ml", "ocaml"},
     {".hs", "haskell"},
@@ -72,9 +144,32 @@ bool hasSourceExtension(const fs::path& path) {
     return sourceExtensions.find(path.extension().string()) != sourceExtensions.end();
 }
 
+bool isExcluded(const fs::path& dirPath, const fs::path& baseDir, const std::set<std::string>& excludedDirs) {
+    if (excludedDirs.empty()) return false;
+    
+    // Check direct filename (e.g., "node_modules")
+    std::string dirName = dirPath.filename().string();
+    if (excludedDirs.count(dirName) > 0) {
+        return true;
+    }
+
+    // Check relative path (e.g., "src/ignored")
+    try {
+        fs::path relPath = fs::relative(dirPath, baseDir);
+        std::string relPathStr = normalizePathSep(relPath.string());
+        if (excludedDirs.count(relPathStr) > 0) {
+            return true;
+        }
+    } catch (...) {
+        // Ignore errors
+    }
+
+    return false;
+}
+
 // Returns a pair of (content, line_count)
 std::pair<std::string, int> readFileWithLineCount(const fs::path& path) {
-    std::ifstream file(path, std::ios::binary);
+    std::ifstream file(path);
     if (!file) return {"[Error: Could not read file]\n", 0};
 
     std::string content((std::istreambuf_iterator<char>(file)),
@@ -99,22 +194,26 @@ std::pair<std::string, int> readFileWithLineCount(const fs::path& path) {
 }
 
 // Function to build and display directory structure tree
-void displayDirectoryTree(const fs::path& baseDir, const fs::path& subdir) {
-    std::cout << "\n" << HEADER_COLOR << "📁 Directory Structure for: " << subdir.filename().string() << RESET << "\n";
+void displayDirectoryTree(const fs::path& baseDir, const fs::path& subdir, const std::set<std::string>& excludedDirs) {
+    std::cout << convertEmojis("\n" + HEADER_COLOR + "📁 Directory Structure for: " + subdir.filename().string() + RESET + "\n");
     std::cout << "```\n";
 
     // Use a simpler approach: collect all directories and files in order
     std::map<std::string, std::vector<std::pair<std::string, int>>> dirContents;
 
     // First pass: collect all source files with their line counts
-    for (const auto& fileEntry : fs::recursive_directory_iterator(subdir)) {
-        if (fileEntry.is_regular_file() && hasSourceExtension(fileEntry.path())) {
-            fs::path relativePath = fs::relative(fileEntry.path(), baseDir);
-            std::string parentPath = relativePath.parent_path().string();
+    for (auto it = fs::recursive_directory_iterator(subdir); it != fs::recursive_directory_iterator(); ++it) {
+        if (it->is_directory()) {
+            if (isExcluded(it->path(), baseDir, excludedDirs)) {
+                it.disable_recursion_pending();
+            }
+        } else if (it->is_regular_file() && hasSourceExtension(it->path())) {
+            fs::path relativePath = fs::relative(it->path(), baseDir);
+            std::string parentPath = normalizePathSep(relativePath.parent_path().string());
             if (parentPath.empty()) parentPath = ".";
 
             std::string filename = relativePath.filename().string();
-            auto [content, lineCount] = readFileWithLineCount(fileEntry.path());
+            auto [content, lineCount] = readFileWithLineCount(it->path());
 
             dirContents[parentPath].push_back({filename, lineCount});
         }
@@ -225,17 +324,51 @@ void displayDirectoryTree(const fs::path& baseDir, const fs::path& subdir) {
 }
 
 int main(int argc, char* argv[]) {
+    initColors();
+    setColors();
+
     fs::path baseDir = "."; // default to current directory
-    
+    std::set<std::string> excludedDirs;
+    bool baseDirSet = false;
+
     // Parse command line arguments
-    if (argc > 2) {
-        std::cerr << "Usage: " << argv[0] << " [directory]\n";
-        std::cerr << "If no directory is specified, uses current directory.\n";
-        return 1;
-    }
-    
-    if (argc == 2) {
-        baseDir = argv[1];
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--exclude") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --exclude requires a list of directories.\n";
+                std::cerr << "Usage: " << argv[0] << " [--exclude dir1,dir2,...] [directory]\n";
+                return 1;
+            }
+            std::string excludesStr = argv[++i];
+            // Split by comma
+            size_t start = 0;
+            size_t end = excludesStr.find(',');
+            while (end != std::string::npos) {
+                std::string token = excludesStr.substr(start, end - start);
+                if (!token.empty()) {
+                    excludedDirs.insert(normalizePathSep(token));
+                }
+                start = end + 1;
+                end = excludesStr.find(',', start);
+            }
+            std::string lastToken = excludesStr.substr(start);
+            if (!lastToken.empty()) {
+                excludedDirs.insert(normalizePathSep(lastToken));
+            }
+        } else if (arg.rfind("-", 0) == 0) { // Any option starting with - (e.g. -h, --help)
+            std::cerr << "Error: Unknown option '" << arg << "'\n";
+            std::cerr << "Usage: " << argv[0] << " [--exclude dir1,dir2,...] [directory]\n";
+            return 1;
+        } else {
+            if (baseDirSet) {
+                std::cerr << "Error: Multiple directories specified.\n";
+                std::cerr << "Usage: " << argv[0] << " [--exclude dir1,dir2,...] [directory]\n";
+                return 1;
+            }
+            baseDir = arg;
+            baseDirSet = true;
+        }
     }
 
     if (!fs::exists(baseDir) || !fs::is_directory(baseDir)) {
@@ -251,10 +384,16 @@ int main(int argc, char* argv[]) {
         if (!entry.is_directory()) continue;
 
         const fs::path& subdir = entry.path();
-        std::cout << "📦 Processing subdirectory: " << subdir.filename() << "\n";
+
+        // Skip excluded directories
+        if (isExcluded(subdir, baseDir, excludedDirs)) {
+            continue;
+        }
+
+        std::cout << convertEmojis("📦 Processing subdirectory: " + subdir.filename().string() + "\n");
 
         // Display directory structure with line counts
-        displayDirectoryTree(baseDir, subdir);
+        displayDirectoryTree(baseDir, subdir, excludedDirs);
 
         // Create combine-txt directory if it doesn't exist
         fs::path outputDir = "combine-txt";
@@ -274,9 +413,13 @@ int main(int argc, char* argv[]) {
         int subdirLines = 0;
 
         // Recursively scan all files in this subdirectory (and nested folders)
-        for (const auto& fileEntry : fs::recursive_directory_iterator(subdir)) {
-            if (fileEntry.is_regular_file() && hasSourceExtension(fileEntry.path())) {
-                sourceFiles.push_back(fileEntry.path());
+        for (auto it = fs::recursive_directory_iterator(subdir); it != fs::recursive_directory_iterator(); ++it) {
+            if (it->is_directory()) {
+                if (isExcluded(it->path(), baseDir, excludedDirs)) {
+                    it.disable_recursion_pending();
+                }
+            } else if (it->is_regular_file() && hasSourceExtension(it->path())) {
+                sourceFiles.push_back(it->path());
             }
         }
 
@@ -292,17 +435,17 @@ int main(int argc, char* argv[]) {
             outFile << "--- file: " << relativePath << " ---\n";
             outFile << "```" << lang << "\n";
             outFile << content;
-            outFile << "```\n\n"; // closing + empty line
-            
+            outFile << "```\n\n";
+
             subdirLines += lineCount;
         }
 
         outFile.close();
-        std::cout << "✅ Wrote " << sourceFiles.size() << " files to '" << outputFileName << "' (" << subdirLines << " lines)\n";
+        std::cout << convertEmojis("✅ Wrote " + std::to_string(sourceFiles.size()) + " files to '" + outputFileName.string() + "' (" + std::to_string(subdirLines) + " lines)\n");
         processedSubdirs++;
         totalLines += subdirLines;
     }
 
-    std::cout << "🎉 Done. Processed " << processedSubdirs << " subdirectories. " << totalLines << " lines.\n";
+    std::cout << convertEmojis("🎉 Done. Processed " + std::to_string(processedSubdirs) + " subdirectories. " + std::to_string(totalLines) + " lines.\n");
     return 0;
 }
